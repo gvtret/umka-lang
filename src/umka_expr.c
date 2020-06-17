@@ -48,6 +48,18 @@ static void doIntToRealConv(Compiler *comp, Type *dest, Type **src, Const *const
 }
 
 
+static void doDynArrayPtrToArrayPtrConv(Compiler *comp, Type *dest, Type **src, Const *constant)
+{
+    if (constant)
+        comp->error("Conversion to array is not allowed in constant expressions");
+
+    genGetFieldPtr(&comp->gen, offsetof(DynArray, data));
+    genDeref(&comp->gen, TYPE_PTR);
+
+    *src = dest;
+}
+
+
 static void doArrayToDynArrayConv(Compiler *comp, Type *dest, Type **src, Const *constant)
 {
     if (constant)
@@ -70,24 +82,15 @@ static void doArrayToDynArrayConv(Compiler *comp, Type *dest, Type **src, Const 
 }
 
 
-static void doDynArrayPtrToArrayPtrConv(Compiler *comp, Type *dest, Type **src, Const *constant)
-{
-    if (constant)
-        comp->error("Conversion to array is not allowed in constant expressions");
-
-    genGetFieldPtr(&comp->gen, offsetof(DynArray, data));
-    genDeref(&comp->gen, TYPE_PTR);
-
-    *src = dest;
-}
-
-
 static void doConcreteToInterfaceConv(Compiler *comp, Type *dest, Type **src, Const *constant)
 {
     if (constant)
         comp->error("Conversion to interface is not allowed in constant expressions");
 
-    Type *rcvType  = typeAddPtrTo(&comp->types, &comp->blocks, *src);
+    Type *rcvType = *src;
+    if (typeStructured(rcvType))
+        rcvType = typeAddPtrTo(&comp->types, &comp->blocks, rcvType);
+
     int destSize   = typeSize(&comp->types, dest);
     int destOffset = identAllocStack(&comp->idents, &comp->blocks, destSize);
 
@@ -168,6 +171,16 @@ static void doInterfaceToInterfaceConv(Compiler *comp, Type *dest, Type **src, C
 }
 
 
+static void doInterfaceToConcreteConv(Compiler *comp, Type *dest, Type **src, Const *constant)
+{
+    if (constant)
+        comp->error("Conversion from interface is not allowed in constant expressions");
+
+    genAssertType(&comp->gen, dest);
+    *src = dest;
+}
+
+
 void doImplicitTypeConv(Compiler *comp, Type *dest, Type **src, Const *constant, bool lhs)
 {
     // Integer to real
@@ -181,17 +194,17 @@ void doImplicitTypeConv(Compiler *comp, Type *dest, Type **src, Const *constant,
     {
         doArrayToDynArrayConv(comp, dest, src, constant);
     }
-
+    
     // Dynamic array pointer to array pointer
     else if (dest->kind == TYPE_PTR && dest->base->kind == TYPE_ARRAY &&
             (*src)->kind == TYPE_PTR && (*src)->base->kind == TYPE_DYNARRAY &&
              typeEquivalent(dest->base->base, (*src)->base->base))
     {
         doDynArrayPtrToArrayPtrConv(comp, dest, src, constant);
-    }
+    }    
 
     // Concrete to interface or interface to interface
-    else if (dest->kind == TYPE_INTERFACE && typeStructured(*src))
+    else if (dest->kind == TYPE_INTERFACE && ((*src)->kind == TYPE_PTR || typeStructured(*src)))
     {
         if ((*src)->kind == TYPE_INTERFACE)
         {
@@ -200,6 +213,12 @@ void doImplicitTypeConv(Compiler *comp, Type *dest, Type **src, Const *constant,
         }
         else
             doConcreteToInterfaceConv(comp, dest, src, constant);
+    }
+
+    // Interface to concrete (type assertion)
+    else if (dest->kind == TYPE_PTR && (*src)->kind == TYPE_INTERFACE)
+    {
+        doInterfaceToConcreteConv(comp, dest, src, constant);
     }
 }
 
@@ -838,7 +857,9 @@ static void parseFieldSelector(Compiler *comp, Type **type, Const *constant, boo
     lexNext(&comp->lex);
     lexCheck(&comp->lex, TOK_IDENT);
 
-    Type *rcvType = typeAddPtrTo(&comp->types, &comp->blocks, *type);
+    Type *rcvType = *type;
+    if (typeStructured(rcvType))
+        rcvType = typeAddPtrTo(&comp->types, &comp->blocks, rcvType);
 
     Ident *method = identFind(&comp->idents, &comp->modules, &comp->blocks,
                                comp->blocks.module, comp->lex.tok.name, rcvType);
